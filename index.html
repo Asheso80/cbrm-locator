@@ -18,6 +18,7 @@ body{display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(saf
 
 header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
 header .title{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);font-weight:600}
+header .beta{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--amber);margin-top:2px}
 header .fix{font-family:var(--mono);font-size:12px;display:flex;align-items:center;gap:6px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--alert);box-shadow:0 0 6px var(--alert)}
 .dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
@@ -104,7 +105,7 @@ footer{padding:8px 14px;border-top:1px solid var(--line);font-size:10px;color:va
 </head>
 <body>
 <header>
-  <div class="title">CBRM Field Locator</div>
+  <div><div class="title">CBRM Field Locator</div><div class="beta">Beta · CBRM coverage only</div></div>
   <div class="fix"><span id="fixdot" class="dot"></span><span id="fixtxt">no fix</span></div>
 </header>
 
@@ -300,13 +301,14 @@ function crossStreets(lon,lat,onStreet,heading){
   if(!cand.length) return {ahead:null,behind:null};
   if(heading==null){
     cand.sort((a,b)=>a.d-b.d);
-    return {ahead:cand[0]?.name||null, behind:cand[1]?.name||null};
+    return {ahead:cand[0]?{name:cand[0].name,d:cand[0].d}:null,
+            behind:cand[1]?{name:cand[1].name,d:cand[1].d}:null};
   }
   let ahead=null,behind=null,ad=Infinity,bd=Infinity;
   for(const c of cand){
     let diff=Math.abs(((c.br-heading+540)%360)-180); // 0=aligned w/ heading,180=behind
-    if(diff<90){ if(c.d<ad){ad=c.d;ahead=c.name;} }
-    else       { if(c.d<bd){bd=c.d;behind=c.name;} }
+    if(diff<90){ if(c.d<ad){ad=c.d;ahead={name:c.name,d:c.d};} }
+    else       { if(c.d<bd){bd=c.d;behind={name:c.name,d:c.d};} }
   }
   return {ahead,behind};
 }
@@ -369,14 +371,14 @@ function render(){
   // street
   if(cur.street){ $('street').textContent=cur.street.name; $('street').classList.remove('pending');
     $('street-sub').textContent=cur.street.d!=null?`± ${Math.round(cur.street.d)} m to centreline`:''; }
-  else { $('street').textContent='no mapped road nearby'; $('street').classList.remove('pending'); $('street-sub').textContent=''; }
+  else { $('street').textContent='no CBRM road data here'; $('street').classList.remove('pending'); $('street-sub').textContent=''; }
   // civic
   if(cur.civic){ $('civic').textContent=cur.civic.label; $('civic').classList.remove('pending');
     $('civic-sub').textContent=`${cur.civic.comm} · ${Math.round(cur.civic.d)} m away`; }
-  else { $('civic').textContent='none in range'; $('civic-sub').textContent=''; }
+  else { $('civic').textContent='no CBRM civic in range'; $('civic-sub').textContent=''; }
   // cross
-  $('cs-ahead').textContent=cur.ahead||'—';
-  $('cs-behind').textContent=cur.behind||'—';
+  $('cs-ahead').textContent=cur.ahead?`${cur.ahead} (${Math.round(cur.aheadD)} m)`:'—';
+  $('cs-behind').textContent=cur.behind?`${cur.behind} (${Math.round(cur.behindD)} m)`:'—';
   // compass
   if(cur.heading!=null){
     $('hdg-deg').textContent=Math.round(cur.heading);
@@ -404,7 +406,10 @@ function recompute(lat,lon,acc,heading){
   const civic = cv?{label:`${cv.p.n} ${cv.p.s}`,comm:cv.p.c,d:cv.d}:null;
   const cs = crossStreets(lon,lat, rd&&rd.r.s?rd.r.s:null, heading);
   cur={lat,lon,acc,heading,hsrc:cur?cur.hsrc:'—',
-       street,civic,ahead:cs.ahead,behind:cs.behind,plus:olcEncode(lat,lon,10)};
+       street,civic,
+       ahead:cs.ahead?cs.ahead.name:null, aheadD:cs.ahead?cs.ahead.d:null,
+       behind:cs.behind?cs.behind.name:null, behindD:cs.behind?cs.behind.d:null,
+       plus:olcEncode(lat,lon,10)};
   render();
 }
 
@@ -412,9 +417,13 @@ function recompute(lat,lon,acc,heading){
 function startGeo(){
  if(!('geolocation' in navigator)){document.getElementById('fixtxt').textContent='no geo';return;}
   navigator.geolocation.watchPosition(pos=>{
-    const {latitude,longitude,accuracy,heading}=pos.coords;
-    let h = (heading!=null && !isNaN(heading))?heading:(cur?cur.heading:null);
-    let hsrc = (heading!=null && !isNaN(heading))?'GPS course':(cur?cur.hsrc:'—');
+    const {latitude,longitude,accuracy,heading,speed}=pos.coords;
+    let h = (cur?cur.heading:null), hsrc = (cur?cur.hsrc:'—');
+    if(heading!=null && !isNaN(heading) && speed!=null && speed>1.5){
+      h=heading; hsrc='GPS course';
+      gpsHoldUntil=Date.now()+3000;      // suppress compass while moving; re-arms when you stop
+      hdgSmoothed=heading;               // hand back to compass without a jump
+    }
     recompute(latitude,longitude,accuracy,h);
     if(cur){cur.hsrc=hsrc;} 
     render();
@@ -425,17 +434,32 @@ function startGeo(){
 }
 
 /* ---------- magnetometer heading ---------- */
+let gpsHoldUntil=0, hdgSmoothed=null;
 function startCompass(){
+  function screenAngle(){
+    try{ return (screen.orientation && screen.orientation.angle) || 0; }catch(_){ return 0; }
+  }
   function handler(e){
     let hd=null;
-    if(e.webkitCompassHeading!=null){ hd=e.webkitCompassHeading; } // iOS
-    else if(e.alpha!=null){ hd=(360-e.alpha)%360; }               // Android
-    if(hd!=null && cur){ cur.heading=hd; cur.hsrc='magnetometer'; render(); }
+    if(e.webkitCompassHeading!=null){ hd=e.webkitCompassHeading; }           // iOS: true compass
+    else if(e.alpha!=null && (e.absolute===true || e.type==='deviceorientationabsolute')){
+      hd=(360 - e.alpha) % 360;                                              // Android: absolute only
+    }
+    if(hd==null) return;                                                     // ignore relative events entirely
+    hd=(hd + screenAngle() + 360) % 360;
+    if(Date.now() < gpsHoldUntil) return;                                    // GPS course owns heading while driving
+    if(hdgSmoothed==null){ hdgSmoothed=hd; }
+    else{ const diff=((hd - hdgSmoothed + 540) % 360) - 180;                 // shortest circular path
+          hdgSmoothed=(hdgSmoothed + 0.3*diff + 360) % 360; }
+    if(cur){ cur.heading=hdgSmoothed; cur.hsrc='compass'; render(); }
   }
   if(typeof DeviceOrientationEvent!=='undefined' &&
      typeof DeviceOrientationEvent.requestPermission==='function'){
     DeviceOrientationEvent.requestPermission().then(s=>{
-      if(s==='granted') window.addEventListener('deviceorientation',handler,true);
+      if(s==='granted'){
+        window.addEventListener('deviceorientationabsolute',handler,true);
+        window.addEventListener('deviceorientation',handler,true);
+      }
     }).catch(()=>{});
   } else {
     window.addEventListener('deviceorientationabsolute',handler,true);
