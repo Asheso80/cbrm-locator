@@ -44,7 +44,7 @@ main{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:
 .compass-wrap{display:flex;align-items:center;gap:16px}
 .dial{position:relative;width:120px;height:120px;flex:none}
 .dial svg{width:100%;height:100%;display:block}
-.rose{transform-origin:60px 60px;transition:transform .12s linear}
+/* rose rotates via SVG attribute only - no CSS transform to avoid origin conflict */
 .heading-read{font-family:var(--mono)}
 .heading-read .deg{font-size:34px;font-weight:600}
 .heading-read .card-dir{font-size:15px;color:var(--amber);letter-spacing:.08em}
@@ -433,9 +433,40 @@ function startGeo(){
   }, {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
 }
 
-/* ---------- magnetometer heading ---------- */
+/* ---------- compass heading ---------- */
 let gpsHoldUntil=0, hdgSmoothed=null;
+const CBRM_DECLINATION_W = 17.3;   // magnetic declination at Cape Breton, degrees WEST.
+                                   // Sensors report magnetic north; GPS course is true north.
+                                   // true = magnetic - declination_west, so both agree.
+function applyHeading(hdMagnetic, src){
+  let hd=(hdMagnetic - CBRM_DECLINATION_W + 360) % 360;   // convert to true north
+  if(Date.now() < gpsHoldUntil) return;                   // GPS course owns heading while driving
+  if(hdgSmoothed==null){ hdgSmoothed=hd; }
+  else{ const diff=((hd - hdgSmoothed + 540) % 360) - 180;
+        hdgSmoothed=(hdgSmoothed + 0.3*diff + 360) % 360; }
+  if(cur){ cur.heading=hdgSmoothed; cur.hsrc=src; render(); }
+}
 function startCompass(){
+  // Preferred: Generic Sensor API. Screen-referenced quaternion handles rotation for us.
+  if('AbsoluteOrientationSensor' in window){
+    try{
+      const s=new AbsoluteOrientationSensor({frequency:10, referenceFrame:'screen'});
+      s.addEventListener('reading',()=>{
+        const q=s.quaternion; if(!q) return;
+        const [x,y,z,w]=q;
+        // heading of the device/screen "up" direction projected onto the horizontal plane
+        const east  = 2*(x*y - w*z);
+        const north = 1 - 2*(x*x + z*z);
+        applyHeading((Math.atan2(east,north)*180/Math.PI + 360) % 360, 'compass');
+      });
+      s.addEventListener('error',()=>{ bindOrientationEvents(); });
+      s.start();
+      return;
+    }catch(e){ /* fall through to events */ }
+  }
+  bindOrientationEvents();
+}
+function bindOrientationEvents(){
   function screenAngle(){
     try{ return (screen.orientation && screen.orientation.angle) || 0; }catch(_){ return 0; }
   }
@@ -445,29 +476,24 @@ function startCompass(){
     else if(e.alpha!=null && (e.absolute===true || e.type==='deviceorientationabsolute')){
       hd=(360 - e.alpha) % 360;                                              // Android: absolute only
     }
-    if(hd==null) return;                                                     // ignore relative events entirely
-    hd=(hd + screenAngle() + 360) % 360;
-    if(Date.now() < gpsHoldUntil) return;                                    // GPS course owns heading while driving
-    if(hdgSmoothed==null){ hdgSmoothed=hd; }
-    else{ const diff=((hd - hdgSmoothed + 540) % 360) - 180;                 // shortest circular path
-          hdgSmoothed=(hdgSmoothed + 0.3*diff + 360) % 360; }
-    if(cur){ cur.heading=hdgSmoothed; cur.hsrc='compass'; render(); }
+    if(hd==null) return;                                                     // ignore relative events
+    applyHeading((hd + screenAngle() + 360) % 360, 'compass');
   }
+  window.addEventListener('deviceorientationabsolute',handler,true);
+  window.addEventListener('deviceorientation',handler,true);
+}
+function requestCompassPermissions(){
   if(typeof DeviceOrientationEvent!=='undefined' &&
      typeof DeviceOrientationEvent.requestPermission==='function'){
     DeviceOrientationEvent.requestPermission().then(s=>{
-      if(s==='granted'){
-        window.addEventListener('deviceorientationabsolute',handler,true);
-        window.addEventListener('deviceorientation',handler,true);
-      }
+      if(s==='granted') startCompass();
     }).catch(()=>{});
   } else {
-    window.addEventListener('deviceorientationabsolute',handler,true);
-    window.addEventListener('deviceorientation',handler,true);
+    startCompass();
   }
 }
 function startCompassBinding(){
-  document.body.addEventListener('click',()=>{startCompass();},{once:true});
+  document.body.addEventListener('click',()=>{requestCompassPermissions();},{once:true});
 }
 
 /* ---------- copy buttons ---------- */
