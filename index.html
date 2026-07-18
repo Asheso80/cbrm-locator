@@ -542,11 +542,6 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t
   clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),1600);}
 
 /* ---------- footer meta ---------- */
-document.getElementById('footer').innerHTML=
-  `Data vintage ${DB.meta.generated} · ${DB.meta.counts.points.toLocaleString()} civics · ${DB.meta.counts.roads.toLocaleString()} roads<br>`+
-  `Contains information licensed under the Open Government Licence – Nova Scotia · field aid only, not a legal record`;
-
-
 async function boot(){
   try{
     document.getElementById('street').textContent='loading map data…';
